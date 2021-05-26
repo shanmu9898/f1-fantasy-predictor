@@ -9,6 +9,7 @@ class DataCreator:
         raw_data = cls._read_data(folder="archive")
         drivers_clean = cls._clean_drivers_data(raw_data)
         qualifying_clean = cls._clean_qualifying_data(raw_data)
+        final_data = cls._generate_final_data(qualifying_clean, drivers_clean, raw_data)
 
 
     @classmethod
@@ -17,6 +18,14 @@ class DataCreator:
         drivers_clean = raw_data.drivers[raw_data.drivers.driverId.isin(driver_ids_list)].drop(
             ["number", "forename", "surname", "dob", "nationality", "url", "driverRef"], axis=1).reset_index(drop=True)
         return drivers_clean
+
+    @classmethod
+    def _copy_quali_data(cls, df):
+        if df["q2_position"].isna().values.all():
+            df["q2_position"] = df["q1_position"]
+        if df["q3_position"].isna().values.all():
+            df["q3_position"] = df["q2_position"]
+        return df
 
     @classmethod
     def _clean_qualifying_data(cls, raw_data):
@@ -49,29 +58,110 @@ class DataCreator:
             on=["raceId", "driverId", "constructorId"],
             how="left"
         )
-        return qualifying
+
+        qualifying = qualifying.drop(
+            ["q1", "q2", "q3"],
+            axis=1
+        )
+
+        qualifying_clean = qualifying.groupby(["raceId"]).transform(lambda x: x.fillna(x.max() + 1))
+        qualifying_clean["raceId"] = qualifying["raceId"]
+
+        qualifying_final = qualifying_clean.groupby(["raceId"]).apply(cls._copy_quali_data)
+
+        return qualifying_final
 
     @classmethod
     def _read_data(cls, folder: str):
         drivers = pd.read_csv(f"{folder}/drivers.csv")
         qualifying = pd.read_csv(f"{folder}/qualifying.csv")
-        constructor_results = pd.read_csv(f"{folder}/constructor_results.csv")
+        constructor_standings = pd.read_csv(f"{folder}/constructor_standings.csv")
         race_results = pd.read_csv(f"{folder}/results.csv")
-        constructors = pd.read_csv(f"{folder}/constructors.csv")
+        races = pd.read_csv(f"{folder}/races.csv")
         return RawData(
             drivers=drivers,
             qualifying=qualifying,
-            constructor_results=constructor_results,
+            constructor_standings=constructor_standings,
             race_results=race_results,
-            constructors=constructors
+            races=races
         )
 
+    @classmethod
+    def _generate_final_data(cls, qualifying_clean, drivers_clean, raw_data):
+        quali_race_results = qualifying_clean.merge(
+            raw_data.race_results,
+            on=["raceId", "driverId", "constructorId"],
+            how="left"
+        )
+
+        quali_race_results =  quali_race_results.drop(
+            ["resultId", "number", "grid", "positionText",
+             "positionOrder", "points","laps", "time",
+             "milliseconds", "fastestLap", "rank",
+             "fastestLapTime", "fastestLapSpeed", "statusId"],
+            axis=1
+        )
+
+        quali_race_results_clean = quali_race_results.copy()
+        quali_race_results_clean = quali_race_results_clean.groupby(["raceId"]).transform(lambda x: x.fillna(x.max() + 1))
+        quali_race_results_clean["raceId"] = quali_race_results["raceId"]
+
+        quali_race_results_clean = quali_race_results_clean.rename(columns=
+            {
+                "position": "driver_standing"
+            }
+        )
+
+        # merging-in constructor results
+        results = quali_race_results_clean.copy()
+        results_w_races = results.merge(
+            raw_data.races,
+            on="raceId",
+            how="left"
+        )
+
+        results_w_races = results_w_races.drop(
+            ["round", "name", "date", "time", "url"],
+            axis=1
+        )
+
+        constructors_clean = raw_data.constructor_standings.copy()
+        constructors_clean = constructors_clean.drop(
+            ["constructorStandingssId", "position", "positionText", "wins"],
+            axis=1
+        )
+
+        constructors_clean = constructors_clean.rename(
+            columns={
+                "points": "constructor_standing"
+            }
+        )
+
+        final_data = results_w_races.merge(
+            constructors_clean,
+            on=["raceId", "constructorId"],
+            how="left"
+        )
+
+        final_data = final_data.merge(
+            drivers_clean,
+            on="driverId",
+            how="right"
+        )
+
+        final_data.columns = ["driver_id", "constructor_id",
+                              "q1_position", "q2_position",
+                              "q3_position", "driver_standing", "race_id",
+                              "year", "circuit_id", "constructor_standing",
+                              "driver_code"]
+
+        return final_data
 
 class RawData:
 
-    def __init__(self, drivers, qualifying, constructor_results, race_results, constructors):
+    def __init__(self, drivers, qualifying, constructor_standings, race_results, races):
         self.drivers = drivers
         self.qualifying = qualifying
-        self.constructor_results = constructor_results
+        self.constructor_standings = constructor_standings
         self.race_results = race_results
-        self.constructor_results = constructors
+        self.races = races
